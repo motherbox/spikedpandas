@@ -9,6 +9,10 @@
 """SpikedPandas"""
 
 
+import tempfile
+import aerospike as aspk
+
+
 def get_namespaces(client):
     """Get a list of namespaces defined on the server.
 
@@ -72,15 +76,45 @@ class AerospikeSetDataFrame(object):
     """A wrapper which makes an aerospike client look like a pandas.DataFrame.
     """
 
-    def __init__(self, client, namespace, set_name):
-        self.client = client
+    def __init__(self, config, namespace, set_name):
+        self.config = config
         self.namespace = namespace
         self.set_name = set_name
+        self._keys = []
+        self.local_buffer = tempfile.NamedTemporaryFile(delete=False)
+        self._connect_client()
+
+    def _primary_key_accumulator(self, key_tuple):
+        self.local_buffer.write(str(key_tuple[0][2]) + "\n")
+
+    def _connect_client(self):
+        self.client = aspk.client(self.config).connect()
 
     def head(self, n_rows=5):
-        pass
+        keys = self.get_aspike_keys(self._keys[:n_rows])
+        if not self.client.isConnected():
+            del self.client
+            self._connect_client()
+        print self.client.get_many(keys)
+
+    def get_aspike_keys(self, keys):
+        return [(self.namespace, self.set_name, key) for key in keys]
 
     @property
     def columns(self):
         self._bins = get_bins(self.client, self.namespace)
         return self._bins
+
+    @property
+    def index(self):
+        scanner = self.client.scan(self.namespace, self.set_name)
+        scanner.select(self.columns[0])
+        scanner.foreach(self._primary_key_accumulator)
+        self.client.close()
+        self.local_buffer.seek(0)
+        keys = self.local_buffer.readlines()
+        self._keys = [int(k.rstrip()) for k in keys]
+        if self.client.isConnected():
+            self.client.close()
+        self.local_buffer.close()
+        return self._keys
